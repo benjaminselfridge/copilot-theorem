@@ -112,6 +112,8 @@ expr :: C.Expr a -> Trans Expr
 
 expr (C.Const t v) = return $ trConst t v
 
+-- expr (C.Matrix t m) = return $ trMatrix t v
+
 expr (C.Label _ _ e) = expr e
 
 expr (C.Drop t k id) = return $ SVal (trType t) (ncSeq id) (_n_plus k)
@@ -133,15 +135,12 @@ expr (C.ExternFun t name args _ _) = do
   return s
   where trArg (C.UExpr {C.uExprExpr}) = expr uExprExpr
 
--- Arrays and functions are treated the same way
+-- Arrays, Matrices and functions are treated the same way
 expr (C.ExternArray ta tb name _ ind _ _) =
   expr (C.ExternFun tb name [C.UExpr ta ind] Nothing Nothing)
 
---------------------------------------------------------------
----not sure about this--
-expr (C.ExternMatrix ta tb name _ _ indr indc _ _) =
-  expr (C.ExternFun tb name [C.UExpr ta indr, C.UExpr ta indc] Nothing Nothing)
---------------------------------------------------------------
+--expr (C.ExternMatrix tb name _ _ _ _) =
+--  expr (C.ExternFun tb name [C.UExpr ta indr, C.UExpr ta indc] Nothing Nothing)
 
 expr (C.Op1 (C.Sign ta) e) = case ta of
   C.Int8   -> trSign ta e
