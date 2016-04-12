@@ -141,6 +141,7 @@ trConst Real    v     = K.ValueLiteral (show v)
 trConst Bool    True  = K.ValueLiteral "true"
 trConst Bool    False = K.ValueLiteral "false"
 
+
 --------------------------------------------------------------------------------
 
 initLocals :: Node -> [K.Term]
@@ -204,6 +205,8 @@ trExpr primed = tr
   where
     tr :: forall t . Expr t -> K.Term
     tr (Const t c) = trConst t c
+    --tr (Vector t v) = K.Vector $ map (trConst t) v
+    --tr (Matrix t m) = K.Matrix $ map (map (trConst t)) m
     tr (Ite _ c e1 e2) = K.FunApp "ite" [tr c, tr e1, tr e2]
     tr (Op1 _ op e) = K.FunApp (show op) [tr e]
     tr (Op2 _ op e1 e2) = K.FunApp (show op) [tr e1, tr e2]

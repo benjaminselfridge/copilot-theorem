@@ -110,9 +110,11 @@ streamRec (C.Stream { C.streamId       = id
 
 expr :: C.Expr a -> Trans Expr
 
-expr (C.Const t v) = return $ trConst t v
+expr (C.Const t c) = return $ trConst t c
 
--- expr (C.Matrix t m) = return $ trMatrix t v
+expr (C.Vector t v) = return $ trVector t v
+
+expr (C.Matrix t m) = return $ trMatrix t m
 
 expr (C.Label _ _ e) = expr e
 
@@ -135,12 +137,14 @@ expr (C.ExternFun t name args _ _) = do
   return s
   where trArg (C.UExpr {C.uExprExpr}) = expr uExprExpr
 
--- Arrays, Matrices and functions are treated the same way
+-- Arrays, Vector and Matrices are treated as functions
+
 expr (C.ExternArray ta tb name _ ind _ _) =
   expr (C.ExternFun tb name [C.UExpr ta ind] Nothing Nothing)
 
---expr (C.ExternMatrix tb name _ _ _ _) =
---  expr (C.ExternFun tb name [C.UExpr ta indr, C.UExpr ta indc] Nothing Nothing)
+expr (C.ExternVector t name _ _ _) = expr (C.ExternFun t name [] Nothing Nothing)
+
+expr (C.ExternMatrix t name _ _ _ _) = expr (C.ExternFun t name [] Nothing Nothing)
 
 expr (C.Op1 (C.Sign ta) e) = case ta of
   C.Int8   -> trSign ta e
@@ -185,6 +189,12 @@ expr (C.Op3 (C.Mux t) cond e1 e2) = do
   e1'   <- expr e1
   e2'   <- expr e2
   newMux cond' (trType t) e1' e2'
+
+trVector :: C.Type a -> [a] -> Expr
+trVector t v = Vector (trType t) (map (trConst t) v)
+
+trMatrix :: C.Type a -> [[a]] -> Expr
+trMatrix t m = Matrix (trType t) (map (map (trConst t)) m)
 
 trConst :: C.Type a -> a -> Expr
 trConst t v = case t of
@@ -267,7 +277,7 @@ trOp2 = \case
   _ -> error "Unsupported binary operator in input." -- TODO(chathhorn)
 
 trType :: C.Type a -> Type
-trType = \case
+trType t = case t of
   C.Bool   -> Bool
   C.Int8   -> SBV8
   C.Int16  -> SBV16

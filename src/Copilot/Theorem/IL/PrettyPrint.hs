@@ -51,6 +51,8 @@ ppExpr :: Expr -> Doc
 ppExpr (ConstB v) = text . show $ v
 ppExpr (ConstR v) = text . show $ v
 ppExpr (ConstI _ v) = text . show $ v
+ppExpr (Vector _ v) = text . show $ v
+ppExpr (Matrix _ m) = text . show $ m
 
 ppExpr (Ite _ c e1 e2) =
   text "if" <+> ppExpr c

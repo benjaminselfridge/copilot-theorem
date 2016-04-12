@@ -150,7 +150,11 @@ stream (C.Stream { C.streamId
 
 expr :: Type t -> C.Expr t' -> Trans (Expr t)
 
-expr t (C.Const t' v) = return $ Const t (cast t $ toDyn t' v)
+expr t (C.Const t' c) = return $ Const t (cast t $ toDyn t' c)
+
+-- expr t (C.Vector t' v) = return $ Vector t (map (\ c -> (cast t $ toDyn t' c)) v)
+
+-- expr t (C.Matrix t' v) = return $ Matrix t (cast t $ toDyn t' v)
 
 expr t (C.Drop _ (fromIntegral -> k :: Int) id) = do
   let node = ncNode id
@@ -189,6 +193,8 @@ expr t (C.ExternVar _ name _) = do
 -- * Unhandled operators
 -- * Extern functions
 -- * Extern arrays
+-- * Extern matrices
+-- * Extern vectors
 -- For now, the result of these operations is a new unconstrained variable
 
 expr t (C.Op1 op e) = handleOp1

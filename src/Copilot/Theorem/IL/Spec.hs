@@ -56,6 +56,8 @@ data Expr
   | Op2    Type Op2 Expr Expr
   | SVal   Type SeqId SeqIndex
   | FunApp Type String [Expr]
+  | Vector Type [Expr]
+  | Matrix Type [[Expr]]
   deriving (Eq, Ord, Show)
 
 --------------------------------------------------------------------------------
@@ -154,6 +156,8 @@ typeOf e = case e of
   Op2    t _ _ _ -> t
   SVal   t _ _   -> t
   FunApp t _ _   -> t
+  Vector t _     -> t
+  Matrix t _     -> t
 
 _n_ :: SeqIndex
 _n_ = Var 0
@@ -169,6 +173,8 @@ evalAt i (Op1 t op e) = Op1 t op (evalAt i e)
 evalAt i (Op2 t op e1 e2) = Op2 t op (evalAt i e1) (evalAt i e2)
 evalAt i (Ite t c e1 e2) = Ite t (evalAt i c) (evalAt i e1) (evalAt i e2)
 evalAt i (FunApp t name args) = FunApp t name $ map (\e -> evalAt i e) args
+evalAt _ v@(Vector _ _) = v
+evalAt _ m@(Matrix _ _) = m
 
 evalAt _ e@(SVal _ _ (Fixed _)) = e
 evalAt (Fixed n) (SVal t s (Var d)) = SVal t s (Fixed $ n + d)

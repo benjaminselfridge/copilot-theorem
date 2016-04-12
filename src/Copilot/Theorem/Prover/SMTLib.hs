@@ -47,6 +47,9 @@ expr :: Expr -> SExpr String
 expr (ConstB v) = atom $ if v then "true" else "false"
 expr (ConstI _ v) = atom $ show v
 expr (ConstR v) = atom $ printf "%f" v
+expr (Vector _ v) = atom $ show v
+expr (Matrix _ m) = atom $ show m
+
 
 expr (Ite _ cond e1 e2) = node "ite" [expr cond, expr e1, expr e2]
 

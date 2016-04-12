@@ -280,6 +280,8 @@ getVars = nubBy' (compare `on` varName) . concatMap getVars'
           ConstB _             -> []
           ConstI _ _           -> []
           ConstR _             -> []
+          Vector _ _             -> []
+          Matrix _ _             -> []
           Ite _ e1 e2 e3       -> getVars' e1 ++ getVars' e2 ++ getVars' e3
           Op1 _ _ e            -> getVars' e
           Op2 _ _ e1 e2        -> getVars' e1 ++ getVars' e2

@@ -49,6 +49,8 @@ expr = \case
   ConstB v        -> Atom $ if v then "$true" else "$false"
   ConstR v        -> Atom $ show v
   ConstI _ v      -> Atom $ show v
+  Vector _ v      -> Atom $ show v
+  Matrix _ m      -> Atom $ show m
 
   Ite _ c e1 e2   -> Bin (Bin (expr c) "=>" (expr e1))
                              "&" (Bin (Un "~" (expr c)) "=>" (expr e2))

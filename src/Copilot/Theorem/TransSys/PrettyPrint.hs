@@ -67,6 +67,12 @@ pConst Integer v = text $ show v
 pConst Real    v = text $ show v
 pConst Bool    v = text $ show v
 
+--pVector :: Type t -> t -> Doc
+--pVector t v = lbrack <> rbrack
+
+--pMatrix :: Type t -> t -> Doc
+--pMatrix t v = lbrack <> rbrack
+
 pExtVar :: ExtVar -> Doc
 pExtVar (ExtVar n v) = parens (text n <+> text ":" <+> text (varName v))
 
@@ -99,6 +105,10 @@ pLVar l (VarDescr {varType, varDef}) = header $$ indent body
 pExpr :: Expr t -> Doc
 
 pExpr (Const t v) = pConst t v
+
+--pExpr (Vector t v) = pVector t v
+
+--pExpr (Matrix t m) = pMatrix t m
 
 pExpr (Ite _ c e1 e2) =
   text "if" <+> pExpr c

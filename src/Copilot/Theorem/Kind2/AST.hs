@@ -30,7 +30,9 @@ data StateVarFlag = FConst
 data PredType = Init | Trans
 
 data Term =
-    ValueLiteral  String
+    ValueLiteral   String
+  -- | Vector         [Term]
+  -- | Matrix         [[Term]]
   | PrimedStateVar String
   | StateVar       String
   | FunApp         String [Term]

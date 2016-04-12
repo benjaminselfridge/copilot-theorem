@@ -74,11 +74,13 @@ data VarDescr = forall t . VarDescr
 data VarDef t = Pre t Var | Expr (Expr t) | Constrs [Expr Bool]
 
 data Expr t where
-  Const :: Type t -> t -> Expr t
-  Ite   :: Type t -> Expr Bool -> Expr t -> Expr t -> Expr t
-  Op1   :: Type t -> Op1 t -> Expr t -> Expr t
-  Op2   :: Type t -> Op2 a t -> Expr a -> Expr a -> Expr t
-  VarE  :: Type t -> Var -> Expr t
+  Const  :: Type t -> t -> Expr t
+  Vector :: Type t -> [t] -> Expr [t]
+  Matrix :: Type t -> [[t]] -> Expr [[t]]
+  Ite    :: Type t -> Expr Bool -> Expr t -> Expr t -> Expr t
+  Op1    :: Type t -> Op1 t -> Expr t -> Expr t
+  Op2    :: Type t -> Op2 a t -> Expr a -> Expr a -> Expr t
+  VarE   :: Type t -> Var -> Expr t
 
 --------------------------------------------------------------------------------
 
