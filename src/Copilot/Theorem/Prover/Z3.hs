@@ -14,7 +14,7 @@ import Copilot.Theorem.Prove (Output (..), check, Proof, Universal, Existential)
 import Copilot.Theorem.IL as IL
 import qualified Copilot.Theorem.Prove as P
 
-import Control.Monad (join, msum, mzero, when, void, unless, (>=>), liftM)
+import Control.Monad (join, msum, mzero, when, void, (>=>), liftM)
 import Control.Monad.State (StateT, runStateT, get, modify)
 import Control.Monad.Trans.Maybe (MaybeT (..))
 
@@ -28,17 +28,14 @@ import Data.Set (Set, (\\), union)
 import qualified Data.Set as Set
 import Data.Map (Map)
 import qualified Data.Map as Map
-import Data.GADT.Compare
 
 import Language.SMTLib2 as SMT
 import Language.SMTLib2.Pipe
 import Language.SMTLib2.Strategy
 import Language.SMTLib2.Debug
 
-import Language.SMTLib2.Pipe.Internals hiding (Var, vars)
-import Language.SMTLib2.Internals.Embed
+import qualified Language.SMTLib2.Internals.Backend as B
 
-import System.Console.ANSI
 import System.IO
 import Control.Monad.Trans
 
@@ -173,7 +170,7 @@ startNewSolver sid = do
 
 stop :: SolverId -> ProofScript ()
 stop sid = do
-  s <- getSolver sid
+  -- s <- getSolver sid
   deleteSolver sid
   -- liftIO $ close s
 
@@ -304,33 +301,33 @@ selectProps propIds properties =
 type Trans = StateT TransState (SMT Solver)
 
 data TransState = TransState
-  { boolVars :: Map String (SMT.Expr Solver BoolType)
-  , bv8Vars  :: Map String (SMT.Expr Solver (BitVecType 8))
-  , bv16Vars :: Map String (SMT.Expr Solver (BitVecType 16))
-  , bv32Vars :: Map String (SMT.Expr Solver (BitVecType 32))
-  , bv64Vars :: Map String (SMT.Expr Solver (BitVecType 64))
-  , realVars  :: Map String (SMT.Expr Solver RealType)
+  { boolVars :: Map String (B.Expr Solver 'BoolType)
+  , bv8Vars  :: Map String (B.Expr Solver ('BitVecType 8))
+  , bv16Vars :: Map String (B.Expr Solver ('BitVecType 16))
+  , bv32Vars :: Map String (B.Expr Solver ('BitVecType 32))
+  , bv64Vars :: Map String (B.Expr Solver ('BitVecType 64))
+  , realVars  :: Map String (B.Expr Solver 'RealType)
   }
 
 noVars :: TransState
 noVars = TransState Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty
 
-getBoolVar :: String -> Trans (SMT.Expr Solver BoolType)
+getBoolVar :: String -> Trans (B.Expr Solver 'BoolType)
 getBoolVar = getVar bool boolVars (\v s -> s {boolVars  = v})
 
-getBV8Var  :: String -> Trans (SMT.Expr Solver (BitVecType 8))
+getBV8Var  :: String -> Trans (B.Expr Solver ('BitVecType 8))
 getBV8Var  = getVar (bitvec $ bw Proxy) bv8Vars  (\v s -> s {bv8Vars  = v})
 
-getBV16Var :: String -> Trans (SMT.Expr Solver (BitVecType 16))
+getBV16Var :: String -> Trans (B.Expr Solver ('BitVecType 16))
 getBV16Var = getVar (bitvec $ bw Proxy) bv16Vars (\v s -> s {bv16Vars = v})
 
-getBV32Var :: String -> Trans (SMT.Expr Solver (BitVecType 32))
+getBV32Var :: String -> Trans (B.Expr Solver ('BitVecType 32))
 getBV32Var = getVar (bitvec $ bw Proxy) bv32Vars (\v s -> s {bv32Vars = v})
 
-getBV64Var :: String -> Trans (SMT.Expr Solver (BitVecType 64))
+getBV64Var :: String -> Trans (B.Expr Solver ('BitVecType 64))
 getBV64Var = getVar (bitvec $ bw Proxy) bv64Vars (\v s -> s {bv64Vars = v})
 
-getRealVar  :: String -> Trans (SMT.Expr Solver RealType)
+getRealVar  :: String -> Trans (B.Expr Solver 'RealType)
 getRealVar  = getVar real realVars (\v s -> s {realVars  = v})
 
 --getVar :: (Unit (SMTAnnotation t), SMTType t) => (TransState -> Map String (SMT.Expr Solver t)) -> (Map String (SMT.Expr Solver t) -> TransState -> TransState) -> String -> Trans (SMT.Expr Solver t)
@@ -343,70 +340,74 @@ getVar t proj upd v = do
       return newVar
     Just x -> return x
 
+-- TODO(chathhorn): plumbing...
 munge = join
+l3 f a b c = lift (f a b c)
+l2 f a b = lift (f a b)
+l1 f a = lift (f a)
 
-transB :: IL.Expr -> Trans (SMT.Expr Solver BoolType)
+transB :: IL.Expr -> Trans (B.Expr Solver 'BoolType)
 transB = \case
-  ConstB b           -> cbool b
-  Ite _ c e1 e2      -> munge $ ite <$> transB c <*> transB e1 <*> transB e2
-  Op1 _ IL.Not e     -> munge $ not' <$> transB e
-  Op2 _ IL.And e1 e2 -> munge $ (.&.) <$> transB e1 <*> transB e2
-  Op2 _ IL.Or e1 e2  -> munge $ (.|.) <$> transB e1 <*> transB e2
+  ConstB b           -> lift $ cbool b
+  Ite _ c e1 e2      -> munge $ l3 ite <$> transB c <*> transB e1 <*> transB e2
+  Op1 _ IL.Not e     -> munge $ l1 not' <$> transB e
+  Op2 _ IL.And e1 e2 -> munge $ l2 (.&.) <$> transB e1 <*> transB e2
+  Op2 _ IL.Or e1 e2  -> munge $ l2 (.|.) <$> transB e1 <*> transB e2
   Op2 _ IL.Eq e1 e2  -> munge $ case typeOf e1 of
-    Bool   -> (.==.) <$> transB e1    <*> transB e2
-    Real   -> (.==.) <$> transR e1    <*> transR e2
-    BV8    -> (.==.) <$> transBV8 e1  <*> transBV8 e2
-    BV16   -> (.==.) <$> transBV16 e1 <*> transBV16 e2
-    BV32   -> (.==.) <$> transBV32 e1 <*> transBV32 e2
-    -- BV64   -> (.==.) <$> transBV64 e1 <*> transBV64 e2
-    SBV8   -> (.==.) <$> transBV8 e1  <*> transBV8 e2
-    SBV16  -> (.==.) <$> transBV16 e1 <*> transBV16 e2
-    SBV32  -> (.==.) <$> transBV32 e1 <*> transBV32 e2
+    Bool   -> l2 (.==.) <$> transB e1    <*> transB e2
+    Real   -> l2 (.==.) <$> transR e1    <*> transR e2
+    BV8    -> l2 (.==.) <$> transBV8 e1  <*> transBV8 e2
+    BV16   -> l2 (.==.) <$> transBV16 e1 <*> transBV16 e2
+    BV32   -> l2 (.==.) <$> transBV32 e1 <*> transBV32 e2
+    -- BV64   -> l2 (.==.) <$> transBV64 e1 <*> transBV64 e2
+    SBV8   -> l2 (.==.) <$> transBV8 e1  <*> transBV8 e2
+    SBV16  -> l2 (.==.) <$> transBV16 e1 <*> transBV16 e2
+    SBV32  -> l2 (.==.) <$> transBV32 e1 <*> transBV32 e2
     -- SBV64  -> (.==.) <$> transBV64 e1 <*> transBV64 e2
   e@(Op2 _ Le e1 e2) -> munge $ case typeOf e1 of
     Bool   -> error $ "Comparing Bools: " ++ show e
-    Real   -> (.<=.) <$> transR e1    <*> transR e2
-    BV8    -> bvule  <$> transBV8 e1  <*> transBV8 e2
-    BV16   -> bvule  <$> transBV16 e1 <*> transBV16 e2
-    BV32   -> bvule  <$> transBV32 e1 <*> transBV32 e2
-    -- BV64   -> bvule  <$> transBV64 e1 <*> transBV64 e2
-    SBV8   -> bvule  <$> transBV8 e1  <*> transBV8 e2
-    SBV16  -> bvule  <$> transBV16 e1 <*> transBV16 e2
-    SBV32  -> bvule  <$> transBV32 e1 <*> transBV32 e2
-    -- SBV64  -> bvule  <$> transBV64 e1 <*> transBV64 e2
+    Real   -> l2 (.<=.) <$> transR e1    <*> transR e2
+    BV8    -> l2 bvule  <$> transBV8 e1  <*> transBV8 e2
+    BV16   -> l2 bvule  <$> transBV16 e1 <*> transBV16 e2
+    BV32   -> l2 bvule  <$> transBV32 e1 <*> transBV32 e2
+    -- BV64   -> l2 bvule  <$> transBV64 e1 <*> transBV64 e2
+    SBV8   -> l2 bvule  <$> transBV8 e1  <*> transBV8 e2
+    SBV16  -> l2 bvule  <$> transBV16 e1 <*> transBV16 e2
+    SBV32  -> l2 bvule  <$> transBV32 e1 <*> transBV32 e2
+    -- SBV64  -> l2 bvule  <$> transBV64 e1 <*> transBV64 e2
   e@(Op2 _ Ge e1 e2) -> munge $ case typeOf e1 of
     Bool   -> error $ "Comparing Bools: " ++ show e
-    Real   -> (.>=.) <$> transR e1    <*> transR e2
-    BV8    -> bvuge  <$> transBV8 e1  <*> transBV8 e2
-    BV16   -> bvuge  <$> transBV16 e1 <*> transBV16 e2
-    BV32   -> bvuge  <$> transBV32 e1 <*> transBV32 e2
-    -- BV64   -> bvuge  <$> transBV64 e1 <*> transBV64 e2
-    SBV8   -> bvuge  <$> transBV8 e1  <*> transBV8 e2
-    SBV16  -> bvuge  <$> transBV16 e1 <*> transBV16 e2
-    SBV32  -> bvuge  <$> transBV32 e1 <*> transBV32 e2
-    -- SBV64  -> bvuge  <$> transBV64 e1 <*> transBV64 e2
+    Real   -> l2 (.>=.) <$> transR e1    <*> transR e2
+    BV8    -> l2 bvuge  <$> transBV8 e1  <*> transBV8 e2
+    BV16   -> l2 bvuge  <$> transBV16 e1 <*> transBV16 e2
+    BV32   -> l2 bvuge  <$> transBV32 e1 <*> transBV32 e2
+    -- BV64   -> l2 bvuge  <$> transBV64 e1 <*> transBV64 e2
+    SBV8   -> l2 bvuge  <$> transBV8 e1  <*> transBV8 e2
+    SBV16  -> l2 bvuge  <$> transBV16 e1 <*> transBV16 e2
+    SBV32  -> l2 bvuge  <$> transBV32 e1 <*> transBV32 e2
+    -- SBV64  -> l2 bvuge  <$> transBV64 e1 <*> transBV64 e2
   e@(Op2 _ Lt e1 e2) -> munge $ case typeOf e1 of
     Bool   -> error $ "Comparing Bools: " ++ show e
-    Real   -> (.<.) <$> transR e1    <*> transR e2
-    BV8    -> bvult <$> transBV8 e1  <*> transBV8 e2
-    BV16   -> bvult <$> transBV16 e1 <*> transBV16 e2
-    BV32   -> bvult <$> transBV32 e1 <*> transBV32 e2
-    -- BV64   -> bvult <$> transBV64 e1 <*> transBV64 e2
-    SBV8   -> bvult <$> transBV8 e1  <*> transBV8 e2
-    SBV16  -> bvult <$> transBV16 e1 <*> transBV16 e2
-    SBV32  -> bvult <$> transBV32 e1 <*> transBV32 e2
-    -- SBV64  -> bvult <$> transBV64 e1 <*> transBV64 e2
+    Real   -> l2 (.<.) <$> transR e1    <*> transR e2
+    BV8    -> l2 bvult <$> transBV8 e1  <*> transBV8 e2
+    BV16   -> l2 bvult <$> transBV16 e1 <*> transBV16 e2
+    BV32   -> l2 bvult <$> transBV32 e1 <*> transBV32 e2
+    -- BV64   -> l2 bvult <$> transBV64 e1 <*> transBV64 e2
+    SBV8   -> l2 bvult <$> transBV8 e1  <*> transBV8 e2
+    SBV16  -> l2 bvult <$> transBV16 e1 <*> transBV16 e2
+    SBV32  -> l2 bvult <$> transBV32 e1 <*> transBV32 e2
+    -- SBV64  -> l2 bvult <$> transBV64 e1 <*> transBV64 e2
   e@(Op2 _ Gt e1 e2) -> munge $ case typeOf e1 of
     Bool   -> error $ "Comparing Bools: " ++ show e
-    Real   -> (.>.) <$> transR e1    <*> transR e2
-    BV8    -> bvugt <$> transBV8 e1  <*> transBV8 e2
-    BV16   -> bvugt <$> transBV16 e1 <*> transBV16 e2
-    BV32   -> bvugt <$> transBV32 e1 <*> transBV32 e2
-    -- BV64   -> bvugt <$> transBV64 e1 <*> transBV64 e2
-    SBV8   -> bvugt <$> transBV8 e1  <*> transBV8 e2
-    SBV16  -> bvugt <$> transBV16 e1 <*> transBV16 e2
-    SBV32  -> bvugt <$> transBV32 e1 <*> transBV32 e2
-    -- SBV64  -> bvugt <$> transBV64 e1 <*> transBV64 e2
+    Real   -> l2 (.>.) <$> transR e1    <*> transR e2
+    BV8    -> l2 bvugt <$> transBV8 e1  <*> transBV8 e2
+    BV16   -> l2 bvugt <$> transBV16 e1 <*> transBV16 e2
+    BV32   -> l2 bvugt <$> transBV32 e1 <*> transBV32 e2
+    -- BV64   -> l2 bvugt <$> transBV64 e1 <*> transBV64 e2
+    SBV8   -> l2 bvugt <$> transBV8 e1  <*> transBV8 e2
+    SBV16  -> l2 bvugt <$> transBV16 e1 <*> transBV16 e2
+    SBV32  -> l2 bvugt <$> transBV32 e1 <*> transBV32 e2
+    -- SBV64  -> l2 bvugt <$> transBV64 e1 <*> transBV64 e2
   SVal _ s i         -> getBoolVar $ ncVar s i
   e                  -> error $ "Encountered unhandled expression (Bool): " ++ show e
 
@@ -414,73 +415,73 @@ ncVar :: String -> SeqIndex -> String
 ncVar s (Fixed i) = s ++ "_" ++ show i
 ncVar s (Var   i) = s ++ "_n" ++ show i
 
-transR :: IL.Expr -> Trans (SMT.Expr Solver RealType)
+transR :: IL.Expr -> Trans (B.Expr Solver 'RealType)
 transR = \case
-  ConstR n         -> creal $ toRational n
-  Ite _ c e1 e2    -> munge $ ite <$> transB c <*> transR e1 <*> transR e2
+  ConstR n         -> lift $ creal $ toRational n
+  Ite _ c e1 e2    -> munge $ l3 ite <$> transB c <*> transR e1 <*> transR e2
 
-  Op1 _ IL.Neg e   -> munge $ neg <$> transR e
-  Op1 _ IL.Abs e   -> munge $ abs' <$> transR e
+  Op1 _ IL.Neg e   -> munge $ l1 neg <$> transR e
+  Op1 _ IL.Abs e   -> munge $ l1 abs' <$> transR e
 
-  Op2 _ Add e1 e2  -> munge $ (.+.) <$> transR e1 <*> transR e2
-  Op2 _ Sub e1 e2  -> munge $ (.-.) <$> transR e1 <*> transR e2
-  Op2 _ Mul e1 e2  -> munge $ (.*.) <$> transR e1 <*> transR e2
-  Op2 _ Fdiv e1 e2 -> munge $ (./.) <$> transR e1 <*> transR e2
+  Op2 _ Add e1 e2  -> munge $ l2 (.+.) <$> transR e1 <*> transR e2
+  Op2 _ Sub e1 e2  -> munge $ l2 (.-.) <$> transR e1 <*> transR e2
+  Op2 _ Mul e1 e2  -> munge $ l2 (.*.) <$> transR e1 <*> transR e2
+  Op2 _ Fdiv e1 e2 -> munge $ l2 (./.) <$> transR e1 <*> transR e2
 
   Op2 _ Pow e1 e2  -> do
     -- let pow = SMTBuiltIn "^" () :: SMTFunction (SMT.Expr Solver Rational, SMT.Expr Solver Rational) Rational
     let pow = undefined -- TODO(chathhorn)
-    pow <$> transR e1 <*> transR e2
+    munge $ l2 pow <$> transR e1 <*> transR e2
 
   SVal _ s i       -> getRealVar $ ncVar s i
   e                -> error $ "Encountered unhandled expression (Rat): " ++ show e
 
 -- TODO(chathhorn): bleghh
-transBV8 :: IL.Expr -> Trans (SMT.Expr Solver (BitVecType 8))
+transBV8 :: IL.Expr -> Trans (B.Expr Solver ('BitVecType 8))
 transBV8 = \case
-  ConstI _ n      -> cbv n $ bw Proxy
-  Ite _ c e1 e2   -> munge $ ite <$> transB c <*> transBV8 e1 <*> transBV8 e2
-  -- Op1 _ IL.Abs e  -> munge $ abs' <$> transBV8 e
-  Op1 _ IL.Neg e  -> munge $ bvneg <$> transBV8 e
-  Op2 _ Add e1 e2 -> munge $ bvadd <$> transBV8 e1 <*> transBV8 e2
-  Op2 _ Sub e1 e2 -> munge $ bvsub <$> transBV8 e1 <*> transBV8 e2
-  Op2 _ Mul e1 e2 -> munge $ bvmul <$> transBV8 e1 <*> transBV8 e2
+  ConstI _ n      -> lift $ cbv n $ bw Proxy
+  Ite _ c e1 e2   -> munge $ l3 ite <$> transB c <*> transBV8 e1 <*> transBV8 e2
+  -- Op1 _ IL.Abs e  -> munge $ l1 abs' <$> transBV8 e
+  Op1 _ IL.Neg e  -> munge $ l1 bvneg <$> transBV8 e
+  Op2 _ Add e1 e2 -> munge $ l2 bvadd <$> transBV8 e1 <*> transBV8 e2
+  Op2 _ Sub e1 e2 -> munge $ l2 bvsub <$> transBV8 e1 <*> transBV8 e2
+  Op2 _ Mul e1 e2 -> munge $ l2 bvmul <$> transBV8 e1 <*> transBV8 e2
   SVal _ s i      -> getBV8Var $ ncVar s i
   e               -> error $ "Encountered unhandled expression (BV8): " ++ show e
 
-transBV16 :: IL.Expr -> Trans (SMT.Expr Solver (BitVecType 16))
+transBV16 :: IL.Expr -> Trans (B.Expr Solver ('BitVecType 16))
 transBV16 = \case
-  ConstI _ n      -> cbv n $ bw Proxy
-  Ite _ c e1 e2   -> munge $ ite <$> transB c <*> transBV16 e1 <*> transBV16 e2
-  -- Op1 _ IL.Abs e  -> munge $ abs' <$> transBV16 e
-  Op1 _ IL.Neg e  -> munge $ bvneg <$> transBV16 e
-  Op2 _ Add e1 e2 -> munge $ bvadd <$> transBV16 e1 <*> transBV16 e2
-  Op2 _ Sub e1 e2 -> munge $ bvsub <$> transBV16 e1 <*> transBV16 e2
-  Op2 _ Mul e1 e2 -> munge $ bvmul <$> transBV16 e1 <*> transBV16 e2
+  ConstI _ n      -> lift $ cbv n $ bw Proxy
+  Ite _ c e1 e2   -> munge $ l3 ite <$> transB c <*> transBV16 e1 <*> transBV16 e2
+  -- Op1 _ IL.Abs e  -> munge $ l1 abs' <$> transBV16 e
+  Op1 _ IL.Neg e  -> munge $ l1 bvneg <$> transBV16 e
+  Op2 _ Add e1 e2 -> munge $ l2 bvadd <$> transBV16 e1 <*> transBV16 e2
+  Op2 _ Sub e1 e2 -> munge $ l2 bvsub <$> transBV16 e1 <*> transBV16 e2
+  Op2 _ Mul e1 e2 -> munge $ l2 bvmul <$> transBV16 e1 <*> transBV16 e2
   SVal _ s i      -> getBV16Var $ ncVar s i
   e               -> error $ "Encountered unhandled expression (BV16): " ++ show e
 
-transBV32 :: IL.Expr -> Trans (SMT.Expr Solver (BitVecType 32))
+transBV32 :: IL.Expr -> Trans (B.Expr Solver ('BitVecType 32))
 transBV32 = \case
-  ConstI _ n      -> cbv n $ bw Proxy
-  Ite _ c e1 e2   -> munge $ ite <$> transB c <*> transBV32 e1 <*> transBV32 e2
-  -- Op1 _ IL.Abs e  -> munge $ abs' <$> transBV32 e
-  Op1 _ IL.Neg e  -> munge $ bvneg <$> transBV32 e
-  Op2 _ Add e1 e2 -> munge $ bvadd <$> transBV32 e1 <*> transBV32 e2
-  Op2 _ Sub e1 e2 -> munge $ bvsub <$> transBV32 e1 <*> transBV32 e2
-  Op2 _ Mul e1 e2 -> munge $ bvmul <$> transBV32 e1 <*> transBV32 e2
+  ConstI _ n      -> lift $ cbv n $ bw Proxy
+  Ite _ c e1 e2   -> munge $ l3 ite <$> transB c <*> transBV32 e1 <*> transBV32 e2
+  -- Op1 _ IL.Abs e  -> munge $ l1 abs' <$> transBV32 e
+  Op1 _ IL.Neg e  -> munge $ l1 bvneg <$> transBV32 e
+  Op2 _ Add e1 e2 -> munge $ l2 bvadd <$> transBV32 e1 <*> transBV32 e2
+  Op2 _ Sub e1 e2 -> munge $ l2 bvsub <$> transBV32 e1 <*> transBV32 e2
+  Op2 _ Mul e1 e2 -> munge $ l2 bvmul <$> transBV32 e1 <*> transBV32 e2
   SVal _ s i      -> getBV32Var $ ncVar s i
   e               -> error $ "Encountered unhandled expression (BV32): " ++ show e
 
-transBV64 :: IL.Expr -> Trans (SMT.Expr Solver (BitVecType 64))
+transBV64 :: IL.Expr -> Trans (B.Expr Solver ('BitVecType 64))
 transBV64 = \case
-  ConstI _ n      -> cbv n $ bw Proxy
-  Ite _ c e1 e2   -> munge $ ite <$> transB c <*> transBV64 e1 <*> transBV64 e2
-  -- Op1 _ IL.Abs e  -> munge $ abs' <$> transBV64 e
-  Op1 _ IL.Neg e  -> munge $ bvneg <$> transBV64 e
-  Op2 _ Add e1 e2 -> munge $ bvadd <$> transBV64 e1 <*> transBV64 e2
-  Op2 _ Sub e1 e2 -> munge $ bvsub <$> transBV64 e1 <*> transBV64 e2
-  Op2 _ Mul e1 e2 -> munge $ bvmul <$> transBV64 e1 <*> transBV64 e2
+  ConstI _ n      -> lift $ cbv n $ bw Proxy
+  Ite _ c e1 e2   -> munge $ l3 ite <$> transB c <*> transBV64 e1 <*> transBV64 e2
+  -- Op1 _ IL.Abs e  -> munge $ l1 abs' <$> transBV64 e
+  Op1 _ IL.Neg e  -> munge $ l1 bvneg <$> transBV64 e
+  Op2 _ Add e1 e2 -> munge $ l2 bvadd <$> transBV64 e1 <*> transBV64 e2
+  Op2 _ Sub e1 e2 -> munge $ l2 bvsub <$> transBV64 e1 <*> transBV64 e2
+  Op2 _ Mul e1 e2 -> munge $ l2 bvmul <$> transBV64 e1 <*> transBV64 e2
   SVal _ s i      -> getBV64Var $ ncVar s i
   e               -> error $ "Encountered unhandled expression (BV64): " ++ show e
 
