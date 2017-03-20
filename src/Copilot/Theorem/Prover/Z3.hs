@@ -30,9 +30,11 @@ import Data.Map (Map)
 import qualified Data.Map as Map
 
 import Language.SMTLib2 as SMT
+import qualified Language.SMTLib2.Internals.Expression as SMT
 import Language.SMTLib2.Pipe
 import Language.SMTLib2.Strategy
 import Language.SMTLib2.Debug
+import Language.SMTLib2.Internals.Monad
 
 import qualified Language.SMTLib2.Internals.Backend as B
 
@@ -101,10 +103,10 @@ kInduction opts = check P.Prover
 
 type Solver = DebugBackend SMTPipe
 
-type ProofScript = MaybeT (StateT ProofState IO)
+type ProofScript = MaybeT (StateT ProofState (SMT Solver))
 
 runPS :: ProofScript a -> ProofState -> IO (Maybe a, ProofState)
-runPS ps = runStateT (runMaybeT ps)
+runPS ps = withBackendExitCleanly (newBackend "??" True) . runStateT (runMaybeT ps)
 
 data ProofState = ProofState
   { options  :: Options
@@ -160,11 +162,15 @@ deleteSolver :: SolverId -> ProofScript ()
 deleteSolver sid =
   (lift . modify) $ \s -> s { solvers = Map.delete sid (solvers s) }
 
+newBackend :: String -> Bool -> IO Solver
+newBackend sid dbg = do
+      pipe <- createPipe "z3" ["-smt2", "-in"]
+      return $ debugBackend' True (not dbg) (Just sid) stdout pipe
+
 startNewSolver :: SolverId -> ProofScript Solver
 startNewSolver sid = do
-  pipe <- liftIO $ createPipe "z3" ["-smt2", "-in"]
   dbg <- liftM debug (options <$> get)
-  let s = debugBackend' True (not dbg) (Just $ show sid) stdout pipe
+  s <- liftIO $ newBackend (show sid) dbg
   setSolver sid s
   return s
 
@@ -183,29 +189,37 @@ proofKind :: Integer -> String
 proofKind 0 = "induction"
 proofKind k = "k-induction (k = " ++ show k ++ ")"
 
+withSolver :: SolverId -> ProofScript ()
+withSolver sid = do
+      b <- getSolver sid
+      doSMT $ modify $ \ss -> ss { backend = b }
+
+doSMT :: SMT Solver a -> ProofScript a
+doSMT = lift . lift
+
 entailment :: SolverId -> [IL.Expr] -> [IL.Expr] -> ProofScript CheckSatResult
 entailment sid assumptions props = do
-  s <- getSolver sid
-  liftIO $ withBackendExitCleanly (return s) $ setOption (ProduceModels True)
-  -- liftIO $ withBackendExitCleanly s $ setOption (ProduceProofs True)
-  -- liftIO $ withBackendExitCleanly s $ setOption (ProduceUnsatCores True)
+  withSolver sid
+  doSMT $ setOption (ProduceModels True)
+  -- doSMT $ setOption (ProduceProofs True)
+  -- doSMT $ setOption (ProduceUnsatCores True)
   vs <- getVars sid
   assumps' <- newAssumps sid assumptions
-  (_, vs')  <- liftIO $ withBackendExitCleanly (return s) $ runStateT (mapM_ (transB >=> lift . assert) assumps') vs
+  (_, vs')  <- doSMT $ runStateT (mapM_ (transB >=> lift . assert) assumps') vs
   setVars sid vs'
-  liftIO $ withBackendExitCleanly (return s) push
-  _ <- liftIO $ withBackendExitCleanly (return s) $ runStateT
+  doSMT push
+  _ <- doSMT $ runStateT
     (transB (bsimpl (foldl' (Op2 Bool IL.Or) (ConstB False) $ map (Op1 Bool IL.Not) props)) >>= lift . assert) vs'
 
   nraNL <- liftM nraNLSat (options <$> get)
   res <- if nraNL
-    then liftIO $ withBackendExitCleanly (return s) $ checkSatWith (Just (UsingParams (CustomTactic "qfnra-nlsat") []))
+    then doSMT $ checkSatWith (Just (UsingParams (CustomTactic "qfnra-nlsat") []))
          (CheckSatLimits (Just 5000) Nothing)
-    else liftIO $ withBackendExitCleanly (return s) $ checkSatWith Nothing (CheckSatLimits (Just 5000) Nothing)
+    else doSMT $ checkSatWith Nothing (CheckSatLimits (Just 5000) Nothing)
 
-  when (res == Sat) $ void $ liftIO $ withBackendExitCleanly (return s) getModel
-  -- when (res == Unsat) $ void $ liftIO $ withBackendExitCleanly (return s) $ getProof
-  liftIO $ withBackendExitCleanly (return s) pop
+  when (res == Sat) $ void $ doSMT getModel
+  -- when (res == Unsat) $ void $ doSMT $ getProof
+  doSMT pop
   -- liftIO $ print model
   return res
 
@@ -340,8 +354,6 @@ getVar t proj upd v = do
       return newVar
     Just x -> return x
 
--- TODO(chathhorn): plumbing...
-munge = join
 l3 f a b c = lift (f a b c)
 l2 f a b = lift (f a b)
 l1 f a = lift (f a)
@@ -349,11 +361,11 @@ l1 f a = lift (f a)
 transB :: IL.Expr -> Trans (B.Expr Solver 'BoolType)
 transB = \case
   ConstB b           -> lift $ cbool b
-  Ite _ c e1 e2      -> munge $ l3 ite <$> transB c <*> transB e1 <*> transB e2
-  Op1 _ IL.Not e     -> munge $ l1 not' <$> transB e
-  Op2 _ IL.And e1 e2 -> munge $ l2 (.&.) <$> transB e1 <*> transB e2
-  Op2 _ IL.Or e1 e2  -> munge $ l2 (.|.) <$> transB e1 <*> transB e2
-  Op2 _ IL.Eq e1 e2  -> munge $ case typeOf e1 of
+  Ite _ c e1 e2      -> join $ l3 ite <$> transB c <*> transB e1 <*> transB e2
+  Op1 _ IL.Not e     -> join $ l1 not' <$> transB e
+  Op2 _ IL.And e1 e2 -> join $ l2 (.&.) <$> transB e1 <*> transB e2
+  Op2 _ IL.Or e1 e2  -> join $ l2 (.|.) <$> transB e1 <*> transB e2
+  Op2 _ IL.Eq e1 e2  -> join $ case typeOf e1 of
     Bool   -> l2 (.==.) <$> transB e1    <*> transB e2
     Real   -> l2 (.==.) <$> transR e1    <*> transR e2
     BV8    -> l2 (.==.) <$> transBV8 e1  <*> transBV8 e2
@@ -364,7 +376,7 @@ transB = \case
     SBV16  -> l2 (.==.) <$> transBV16 e1 <*> transBV16 e2
     SBV32  -> l2 (.==.) <$> transBV32 e1 <*> transBV32 e2
     -- SBV64  -> (.==.) <$> transBV64 e1 <*> transBV64 e2
-  e@(Op2 _ Le e1 e2) -> munge $ case typeOf e1 of
+  e@(Op2 _ Le e1 e2) -> join $ case typeOf e1 of
     Bool   -> error $ "Comparing Bools: " ++ show e
     Real   -> l2 (.<=.) <$> transR e1    <*> transR e2
     BV8    -> l2 bvule  <$> transBV8 e1  <*> transBV8 e2
@@ -375,7 +387,7 @@ transB = \case
     SBV16  -> l2 bvule  <$> transBV16 e1 <*> transBV16 e2
     SBV32  -> l2 bvule  <$> transBV32 e1 <*> transBV32 e2
     -- SBV64  -> l2 bvule  <$> transBV64 e1 <*> transBV64 e2
-  e@(Op2 _ Ge e1 e2) -> munge $ case typeOf e1 of
+  e@(Op2 _ Ge e1 e2) -> join $ case typeOf e1 of
     Bool   -> error $ "Comparing Bools: " ++ show e
     Real   -> l2 (.>=.) <$> transR e1    <*> transR e2
     BV8    -> l2 bvuge  <$> transBV8 e1  <*> transBV8 e2
@@ -386,7 +398,7 @@ transB = \case
     SBV16  -> l2 bvuge  <$> transBV16 e1 <*> transBV16 e2
     SBV32  -> l2 bvuge  <$> transBV32 e1 <*> transBV32 e2
     -- SBV64  -> l2 bvuge  <$> transBV64 e1 <*> transBV64 e2
-  e@(Op2 _ Lt e1 e2) -> munge $ case typeOf e1 of
+  e@(Op2 _ Lt e1 e2) -> join $ case typeOf e1 of
     Bool   -> error $ "Comparing Bools: " ++ show e
     Real   -> l2 (.<.) <$> transR e1    <*> transR e2
     BV8    -> l2 bvult <$> transBV8 e1  <*> transBV8 e2
@@ -397,7 +409,7 @@ transB = \case
     SBV16  -> l2 bvult <$> transBV16 e1 <*> transBV16 e2
     SBV32  -> l2 bvult <$> transBV32 e1 <*> transBV32 e2
     -- SBV64  -> l2 bvult <$> transBV64 e1 <*> transBV64 e2
-  e@(Op2 _ Gt e1 e2) -> munge $ case typeOf e1 of
+  e@(Op2 _ Gt e1 e2) -> join $ case typeOf e1 of
     Bool   -> error $ "Comparing Bools: " ++ show e
     Real   -> l2 (.>.) <$> transR e1    <*> transR e2
     BV8    -> l2 bvugt <$> transBV8 e1  <*> transBV8 e2
@@ -418,20 +430,19 @@ ncVar s (Var   i) = s ++ "_n" ++ show i
 transR :: IL.Expr -> Trans (B.Expr Solver 'RealType)
 transR = \case
   ConstR n         -> lift $ creal $ toRational n
-  Ite _ c e1 e2    -> munge $ l3 ite <$> transB c <*> transR e1 <*> transR e2
+  Ite _ c e1 e2    -> join $ l3 ite <$> transB c <*> transR e1 <*> transR e2
 
-  Op1 _ IL.Neg e   -> munge $ l1 neg <$> transR e
-  Op1 _ IL.Abs e   -> munge $ l1 abs' <$> transR e
+  Op1 _ IL.Neg e   -> join $ l1 neg <$> transR e
+  Op1 _ IL.Abs e   -> join $ l1 abs' <$> transR e
 
-  Op2 _ Add e1 e2  -> munge $ l2 (.+.) <$> transR e1 <*> transR e2
-  Op2 _ Sub e1 e2  -> munge $ l2 (.-.) <$> transR e1 <*> transR e2
-  Op2 _ Mul e1 e2  -> munge $ l2 (.*.) <$> transR e1 <*> transR e2
-  Op2 _ Fdiv e1 e2 -> munge $ l2 (./.) <$> transR e1 <*> transR e2
+  Op2 _ Add e1 e2  -> join $ l2 (.+.) <$> transR e1 <*> transR e2
+  Op2 _ Sub e1 e2  -> join $ l2 (.-.) <$> transR e1 <*> transR e2
+  Op2 _ Mul e1 e2  -> join $ l2 (.*.) <$> transR e1 <*> transR e2
+  Op2 _ Fdiv e1 e2 -> join $ l2 (./.) <$> transR e1 <*> transR e2
 
-  Op2 _ Pow e1 e2  -> do
-    -- let pow = SMTBuiltIn "^" () :: SMTFunction (SMT.Expr Solver Rational, SMT.Expr Solver Rational) Rational
-    let pow = undefined -- TODO(chathhorn)
-    munge $ l2 pow <$> transR e1 <*> transR e2
+  Op2 _ Pow e1 e2  -> error "pow/sqrt unsupported :("
+  -- Op2 _ Pow e1 e2  -> join $ l2 (fun pow) <$> transR e1 <*> transR e2
+  --     where pow = undefined
 
   SVal _ s i       -> getRealVar $ ncVar s i
   e                -> error $ "Encountered unhandled expression (Rat): " ++ show e
@@ -440,48 +451,48 @@ transR = \case
 transBV8 :: IL.Expr -> Trans (B.Expr Solver ('BitVecType 8))
 transBV8 = \case
   ConstI _ n      -> lift $ cbv n $ bw Proxy
-  Ite _ c e1 e2   -> munge $ l3 ite <$> transB c <*> transBV8 e1 <*> transBV8 e2
-  -- Op1 _ IL.Abs e  -> munge $ l1 abs' <$> transBV8 e
-  Op1 _ IL.Neg e  -> munge $ l1 bvneg <$> transBV8 e
-  Op2 _ Add e1 e2 -> munge $ l2 bvadd <$> transBV8 e1 <*> transBV8 e2
-  Op2 _ Sub e1 e2 -> munge $ l2 bvsub <$> transBV8 e1 <*> transBV8 e2
-  Op2 _ Mul e1 e2 -> munge $ l2 bvmul <$> transBV8 e1 <*> transBV8 e2
+  Ite _ c e1 e2   -> join $ l3 ite <$> transB c <*> transBV8 e1 <*> transBV8 e2
+  -- Op1 _ IL.Abs e  -> join $ l1 abs' <$> transBV8 e
+  Op1 _ IL.Neg e  -> join $ l1 bvneg <$> transBV8 e
+  Op2 _ Add e1 e2 -> join $ l2 bvadd <$> transBV8 e1 <*> transBV8 e2
+  Op2 _ Sub e1 e2 -> join $ l2 bvsub <$> transBV8 e1 <*> transBV8 e2
+  Op2 _ Mul e1 e2 -> join $ l2 bvmul <$> transBV8 e1 <*> transBV8 e2
   SVal _ s i      -> getBV8Var $ ncVar s i
   e               -> error $ "Encountered unhandled expression (BV8): " ++ show e
 
 transBV16 :: IL.Expr -> Trans (B.Expr Solver ('BitVecType 16))
 transBV16 = \case
   ConstI _ n      -> lift $ cbv n $ bw Proxy
-  Ite _ c e1 e2   -> munge $ l3 ite <$> transB c <*> transBV16 e1 <*> transBV16 e2
-  -- Op1 _ IL.Abs e  -> munge $ l1 abs' <$> transBV16 e
-  Op1 _ IL.Neg e  -> munge $ l1 bvneg <$> transBV16 e
-  Op2 _ Add e1 e2 -> munge $ l2 bvadd <$> transBV16 e1 <*> transBV16 e2
-  Op2 _ Sub e1 e2 -> munge $ l2 bvsub <$> transBV16 e1 <*> transBV16 e2
-  Op2 _ Mul e1 e2 -> munge $ l2 bvmul <$> transBV16 e1 <*> transBV16 e2
+  Ite _ c e1 e2   -> join $ l3 ite <$> transB c <*> transBV16 e1 <*> transBV16 e2
+  -- Op1 _ IL.Abs e  -> join $ l1 abs' <$> transBV16 e
+  Op1 _ IL.Neg e  -> join $ l1 bvneg <$> transBV16 e
+  Op2 _ Add e1 e2 -> join $ l2 bvadd <$> transBV16 e1 <*> transBV16 e2
+  Op2 _ Sub e1 e2 -> join $ l2 bvsub <$> transBV16 e1 <*> transBV16 e2
+  Op2 _ Mul e1 e2 -> join $ l2 bvmul <$> transBV16 e1 <*> transBV16 e2
   SVal _ s i      -> getBV16Var $ ncVar s i
   e               -> error $ "Encountered unhandled expression (BV16): " ++ show e
 
 transBV32 :: IL.Expr -> Trans (B.Expr Solver ('BitVecType 32))
 transBV32 = \case
   ConstI _ n      -> lift $ cbv n $ bw Proxy
-  Ite _ c e1 e2   -> munge $ l3 ite <$> transB c <*> transBV32 e1 <*> transBV32 e2
-  -- Op1 _ IL.Abs e  -> munge $ l1 abs' <$> transBV32 e
-  Op1 _ IL.Neg e  -> munge $ l1 bvneg <$> transBV32 e
-  Op2 _ Add e1 e2 -> munge $ l2 bvadd <$> transBV32 e1 <*> transBV32 e2
-  Op2 _ Sub e1 e2 -> munge $ l2 bvsub <$> transBV32 e1 <*> transBV32 e2
-  Op2 _ Mul e1 e2 -> munge $ l2 bvmul <$> transBV32 e1 <*> transBV32 e2
+  Ite _ c e1 e2   -> join $ l3 ite <$> transB c <*> transBV32 e1 <*> transBV32 e2
+  -- Op1 _ IL.Abs e  -> join $ l1 abs' <$> transBV32 e
+  Op1 _ IL.Neg e  -> join $ l1 bvneg <$> transBV32 e
+  Op2 _ Add e1 e2 -> join $ l2 bvadd <$> transBV32 e1 <*> transBV32 e2
+  Op2 _ Sub e1 e2 -> join $ l2 bvsub <$> transBV32 e1 <*> transBV32 e2
+  Op2 _ Mul e1 e2 -> join $ l2 bvmul <$> transBV32 e1 <*> transBV32 e2
   SVal _ s i      -> getBV32Var $ ncVar s i
   e               -> error $ "Encountered unhandled expression (BV32): " ++ show e
 
 transBV64 :: IL.Expr -> Trans (B.Expr Solver ('BitVecType 64))
 transBV64 = \case
   ConstI _ n      -> lift $ cbv n $ bw Proxy
-  Ite _ c e1 e2   -> munge $ l3 ite <$> transB c <*> transBV64 e1 <*> transBV64 e2
-  -- Op1 _ IL.Abs e  -> munge $ l1 abs' <$> transBV64 e
-  Op1 _ IL.Neg e  -> munge $ l1 bvneg <$> transBV64 e
-  Op2 _ Add e1 e2 -> munge $ l2 bvadd <$> transBV64 e1 <*> transBV64 e2
-  Op2 _ Sub e1 e2 -> munge $ l2 bvsub <$> transBV64 e1 <*> transBV64 e2
-  Op2 _ Mul e1 e2 -> munge $ l2 bvmul <$> transBV64 e1 <*> transBV64 e2
+  Ite _ c e1 e2   -> join $ l3 ite <$> transB c <*> transBV64 e1 <*> transBV64 e2
+  -- Op1 _ IL.Abs e  -> join $ l1 abs' <$> transBV64 e
+  Op1 _ IL.Neg e  -> join $ l1 bvneg <$> transBV64 e
+  Op2 _ Add e1 e2 -> join $ l2 bvadd <$> transBV64 e1 <*> transBV64 e2
+  Op2 _ Sub e1 e2 -> join $ l2 bvsub <$> transBV64 e1 <*> transBV64 e2
+  Op2 _ Mul e1 e2 -> join $ l2 bvmul <$> transBV64 e1 <*> transBV64 e2
   SVal _ s i      -> getBV64Var $ ncVar s i
   e               -> error $ "Encountered unhandled expression (BV64): " ++ show e
 
