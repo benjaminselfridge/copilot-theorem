@@ -18,6 +18,9 @@ import Control.Monad (join, msum, mzero, when, void, (>=>), liftM)
 import Control.Monad.State (StateT, runStateT, get, modify)
 import Control.Monad.Trans.Maybe (MaybeT (..))
 
+-- TODO(chathhorn): big hack
+import Copilot.Theorem.Prover.Debug
+
 import Data.Default (Default(..))
 import Data.List (foldl')
 import Data.Maybe (fromJust, fromMaybe)
@@ -26,14 +29,16 @@ import Data.Word
 
 import Data.Set (Set, (\\), union)
 import qualified Data.Set as Set
-import Data.Map (Map)
-import qualified Data.Map as Map
+import Data.Map.Strict (Map)
+import qualified Data.Map.Strict as Map
+import qualified Data.Dependent.Map as DMap
+import qualified Data.Text as T
 
 import Language.SMTLib2 as SMT
-import qualified Language.SMTLib2.Internals.Expression as SMT
+import qualified Language.SMTLib2.Internals.Expression as E
 import Language.SMTLib2.Pipe
+import qualified Language.SMTLib2.Pipe.Internals as Pipe
 import Language.SMTLib2.Strategy
-import Language.SMTLib2.Debug
 import Language.SMTLib2.Internals.Monad
 
 import qualified Language.SMTLib2.Internals.Backend as B
@@ -106,7 +111,7 @@ type Solver = DebugBackend SMTPipe
 type ProofScript = MaybeT (StateT ProofState (SMT Solver))
 
 runPS :: ProofScript a -> ProofState -> IO (Maybe a, ProofState)
-runPS ps = withBackendExitCleanly (newBackend "??" True) . runStateT (runMaybeT ps)
+runPS ps = withBackendExitCleanly (newBackend "[ignore this line]" True) . runStateT (runMaybeT ps)
 
 data ProofState = ProofState
   { options  :: Options
@@ -165,14 +170,19 @@ deleteSolver sid =
 newBackend :: String -> Bool -> IO Solver
 newBackend sid dbg = do
       pipe <- createPipe "z3" ["-smt2", "-in"]
-      return $ debugBackend' True (not dbg) (Just sid) stdout pipe
+      -- TODO(chathhorn): hack
+      let pipe' = pipe { Pipe.vars = Map.insert (T.pack "^") (Pipe.Fun (real ::: real ::: Nil) real) (Pipe.vars pipe) }
+      let b = debugBackend' True (not dbg) (Just sid) stdout pipe'
+      let f = B.UntypedFun (T.pack "^") (real ::: real ::: Nil) real
+      let b' = b { debugFuns = DMap.insert f f (debugFuns b) }
+      return b'
 
 startNewSolver :: SolverId -> ProofScript Solver
 startNewSolver sid = do
   dbg <- liftM debug (options <$> get)
-  s <- liftIO $ newBackend (show sid) dbg
-  setSolver sid s
-  return s
+  b <- liftIO $ newBackend (show sid) dbg
+  setSolver sid b
+  return b
 
 stop :: SolverId -> ProofScript ()
 stop sid = do
@@ -208,8 +218,7 @@ entailment sid assumptions props = do
   (_, vs')  <- doSMT $ runStateT (mapM_ (transB >=> lift . assert) assumps') vs
   setVars sid vs'
   doSMT push
-  _ <- doSMT $ runStateT
-    (transB (bsimpl (foldl' (Op2 Bool IL.Or) (ConstB False) $ map (Op1 Bool IL.Not) props)) >>= lift . assert) vs'
+  _ <- doSMT $ runStateT (transB (bsimpl (foldl' (Op2 Bool IL.Or) (ConstB False) $ map (Op1 Bool IL.Not) props)) >>= lift . assert) vs'
 
   nraNL <- liftM nraNLSat (options <$> get)
   res <- if nraNL
@@ -342,9 +351,9 @@ getBV64Var :: String -> Trans (B.Expr Solver ('BitVecType 64))
 getBV64Var = getVar (bitvec $ bw Proxy) bv64Vars (\v s -> s {bv64Vars = v})
 
 getRealVar  :: String -> Trans (B.Expr Solver 'RealType)
-getRealVar  = getVar real realVars (\v s -> s {realVars  = v})
+getRealVar  = getVar real realVars (\v s -> s {realVars = v})
 
---getVar :: (Unit (SMTAnnotation t), SMTType t) => (TransState -> Map String (SMT.Expr Solver t)) -> (Map String (SMT.Expr Solver t) -> TransState -> TransState) -> String -> Trans (SMT.Expr Solver t)
+--getVar :: <blaaaaaaah>
 getVar t proj upd v = do
   vs <- proj <$> get
   case Map.lookup v vs of
@@ -440,9 +449,10 @@ transR = \case
   Op2 _ Mul e1 e2  -> join $ l2 (.*.) <$> transR e1 <*> transR e2
   Op2 _ Fdiv e1 e2 -> join $ l2 (./.) <$> transR e1 <*> transR e2
 
-  Op2 _ Pow e1 e2  -> error "pow/sqrt unsupported :("
-  -- Op2 _ Pow e1 e2  -> join $ l2 (fun pow) <$> transR e1 <*> transR e2
-  --     where pow = undefined
+  Op2 _ Pow e1 e2  -> do
+      e1' <- transR e1
+      e2' <- transR e2
+      lift $ fun (B.UntypedFun (T.pack "^") (real ::: real ::: Nil) real) (e1' ::: e2' ::: Nil)
 
   SVal _ s i       -> getRealVar $ ncVar s i
   e                -> error $ "Encountered unhandled expression (Rat): " ++ show e

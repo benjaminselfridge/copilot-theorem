@@ -53,8 +53,11 @@ library
                           , transformers
                           , smtlib2 >= 1.0
                           , smtlib2-pipe >= 1.0
-                          , smtlib2-debug >= 1.0
-                          , ansi-terminal
+                          , ansi-terminal >= 0.5
+                          , text
+                          , atto-lisp
+                          , dependent-map >= 0.2
+                          , dependent-sum
 
   exposed-modules         : Copilot.Theorem
                           , Copilot.Theorem.Prove
@@ -80,6 +83,7 @@ library
                           , Copilot.Theorem.Prover.SMTLib
                           , Copilot.Theorem.Prover.TPTP
                           , Copilot.Theorem.Prover.Backend
+                          , Copilot.Theorem.Prover.Debug
 
                           , Copilot.Theorem.Misc.Error
                           , Copilot.Theorem.Misc.SExpr
