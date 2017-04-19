@@ -18,9 +18,6 @@ import Control.Monad (join, msum, mzero, when, void, (>=>), liftM)
 import Control.Monad.State (StateT, runStateT, get, modify)
 import Control.Monad.Trans.Maybe (MaybeT (..))
 
--- TODO(chathhorn): big hack
-import Copilot.Theorem.Prover.Debug
-
 import Data.Default (Default(..))
 import Data.List (foldl')
 import Data.Maybe (fromJust, fromMaybe)
@@ -31,15 +28,12 @@ import Data.Set (Set, (\\), union)
 import qualified Data.Set as Set
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import qualified Data.Dependent.Map as DMap
-import qualified Data.Text as T
 
 import Language.SMTLib2 as SMT
-import qualified Language.SMTLib2.Internals.Expression as E
 import Language.SMTLib2.Pipe
-import qualified Language.SMTLib2.Pipe.Internals as Pipe
 import Language.SMTLib2.Strategy
 import Language.SMTLib2.Internals.Monad
+import Language.SMTLib2.Debug
 
 import qualified Language.SMTLib2.Internals.Backend as B
 
@@ -170,12 +164,7 @@ deleteSolver sid =
 newBackend :: String -> Bool -> IO Solver
 newBackend sid dbg = do
       pipe <- createPipe "z3" ["-smt2", "-in"]
-      -- TODO(chathhorn): hack
-      let pipe' = pipe { Pipe.vars = Map.insert (T.pack "^") (Pipe.Fun (real ::: real ::: Nil) real) (Pipe.vars pipe) }
-      let b = debugBackend' True (not dbg) (Just sid) stdout pipe'
-      let f = B.UntypedFun (T.pack "^") (real ::: real ::: Nil) real
-      let b' = b { debugFuns = DMap.insert f f (debugFuns b) }
-      return b'
+      return $ debugBackend' True (not dbg) (Just sid) stdout pipe
 
 startNewSolver :: SolverId -> ProofScript Solver
 startNewSolver sid = do
@@ -329,7 +318,7 @@ data TransState = TransState
   , bv16Vars :: Map String (B.Expr Solver ('BitVecType 16))
   , bv32Vars :: Map String (B.Expr Solver ('BitVecType 32))
   , bv64Vars :: Map String (B.Expr Solver ('BitVecType 64))
-  , realVars  :: Map String (B.Expr Solver 'RealType)
+  , realVars :: Map String (B.Expr Solver 'RealType)
   }
 
 noVars :: TransState
@@ -353,7 +342,6 @@ getBV64Var = getVar (bitvec $ bw Proxy) bv64Vars (\v s -> s {bv64Vars = v})
 getRealVar  :: String -> Trans (B.Expr Solver 'RealType)
 getRealVar  = getVar real realVars (\v s -> s {realVars = v})
 
---getVar :: <blaaaaaaah>
 getVar t proj upd v = do
   vs <- proj <$> get
   case Map.lookup v vs of
@@ -452,7 +440,8 @@ transR = \case
   Op2 _ Pow e1 e2  -> do
       e1' <- transR e1
       e2' <- transR e2
-      lift $ fun (B.UntypedFun (T.pack "^") (real ::: real ::: Nil) real) (e1' ::: e2' ::: Nil)
+      f <- lift $ builtIn "^" (real ::: real ::: Nil) real
+      lift $ (fun f) (e1' ::: e2' ::: Nil)
 
   SVal _ s i       -> getRealVar $ ncVar s i
   e                -> error $ "Encountered unhandled expression (Rat): " ++ show e
