@@ -90,7 +90,6 @@ import Data.Parameterized.Some
 import Data.Parameterized.SymbolRepr
 import qualified Data.Parameterized.Vector as V
 import Data.Word
-import GHC.Float (castWord32ToFloat, castWord64ToDouble)
 import GHC.TypeNats (KnownNat)
 import qualified Panic as Panic
 
@@ -265,17 +264,11 @@ data XExpr t where
   XWord16     :: WB.Expr t (WT.BaseBVType 16) -> XExpr t
   XWord32     :: WB.Expr t (WT.BaseBVType 32) -> XExpr t
   XWord64     :: WB.Expr t (WT.BaseBVType 64) -> XExpr t
-  XFloat      :: WB.Expr t (WT.BaseFloatType WT.Prec32) -> XExpr t
-  XDouble     :: WB.Expr t (WT.BaseFloatType WT.Prec64) -> XExpr t
+  XFloat      :: WB.Expr t WT.BaseRealType -> XExpr t
+  XDouble     :: WB.Expr t WT.BaseRealType -> XExpr t
   XEmptyArray :: XExpr t
   XArray      :: 1 <= n => V.Vector n (XExpr t) -> XExpr t
   XStruct     :: [XExpr t] -> XExpr t
-  -- XArray      :: NatRepr n
-  --             -> BaseTypeRepr tp
-  --             -> Some (WB.Expr t)
-  -- XStruct     :: Assignment BaseTypeRepr tps
-  --             -> WB.Expr t (BaseStructType tps)
-  --             -> XExpr t
 
 deriving instance Show (XExpr t)
 
@@ -295,9 +288,9 @@ valFromExpr ge xe = case xe of
   XWord32 e -> Some . CopilotValue CT.Word32 . fromBV <$> WG.groundEval ge e
   XWord64 e -> Some . CopilotValue CT.Word64 . fromBV <$> WG.groundEval ge e
   XFloat e ->
-    Some . CopilotValue CT.Float . castWord32ToFloat . fromBV <$> WG.groundEval ge e
+    Some . CopilotValue CT.Float . fromRational <$> WG.groundEval ge e
   XDouble e ->
-    Some . CopilotValue CT.Double . castWord64ToDouble . fromBV <$> WG.groundEval ge e
+    Some . CopilotValue CT.Double . fromRational <$> WG.groundEval ge e
   _ -> error "valFromExpr unhandled case"
   where fromBV :: forall a w . Num a => BV.BV w -> a
         fromBV = fromInteger . BV.asUnsigned
@@ -351,8 +344,8 @@ translateConstExpr sym tp a = case tp of
   CT.Word16 -> XWord16 <$> WI.bvLit sym knownNat (BV.word16 a)
   CT.Word32 -> XWord32 <$> WI.bvLit sym knownNat (BV.word32 a)
   CT.Word64 -> XWord64 <$> WI.bvLit sym knownNat (BV.word64 a)
-  CT.Float -> XFloat <$> WI.floatLit sym knownRepr (toRational a)
-  CT.Double -> XDouble <$> WI.floatLit sym knownRepr (toRational a)
+  CT.Float -> XFloat <$> WI.realLit sym (toRational a)
+  CT.Double -> XDouble <$> WI.realLit sym (toRational a)
   CT.Array tp -> do
     elts <- traverse (translateConstExpr sym tp) (CT.arrayelems a)
     Just (Some n) <- return $ someNat (length elts)
@@ -535,8 +528,6 @@ translateExprAt sym k e = do
 
 type BVOp1 w t = (KnownNat w, 1 <= w) => WB.BVExpr t w -> IO (WB.BVExpr t w)
 
-type FPOp1 fpp t = KnownRepr WT.FloatPrecisionRepr fpp => WB.Expr t (WT.BaseFloatType fpp) -> IO (WB.Expr t (WT.BaseFloatType fpp))
-
 type RealOp1 t = WB.Expr t WT.BaseRealType -> IO (WB.Expr t WT.BaseRealType)
 
 fieldName :: KnownSymbol s => CT.Field s a -> SymbolRepr s
@@ -553,18 +544,18 @@ translateOp1 :: forall t st fs a b .
 translateOp1 sym op xe = case (op, xe) of
   (CE.Not, XBool e) -> XBool <$> WI.notPred sym e
   (CE.Not, _) -> panic
-  (CE.Abs _, xe) -> numOp bvAbs fpAbs xe
+  (CE.Abs _, xe) -> numOp bvAbs realAbs xe
     where bvAbs :: BVOp1 w t
           bvAbs e = do zero <- WI.bvLit sym knownNat (BV.zero knownNat)
                        e_neg <- WI.bvSlt sym e zero
                        neg_e <- WI.bvSub sym zero e
                        WI.bvIte sym e_neg neg_e e
-          fpAbs :: FPOp1 fpp t
-          fpAbs e = do zero <- WI.floatLit sym knownRepr 0
-                       e_neg <- WI.floatLt sym e zero
-                       neg_e <- WI.floatSub sym fpRM zero e
-                       WI.floatIte sym e_neg neg_e e
-  (CE.Sign _, xe) -> numOp bvSign fpSign xe
+          realAbs :: RealOp1 t
+          realAbs e = do zero <- WI.realLit sym 0
+                         e_neg <- WI.realLt sym e zero
+                         neg_e <- WI.realSub sym zero e
+                         WI.realIte sym e_neg neg_e e
+  (CE.Sign _, xe) -> numOp bvSign realSign xe
     where bvSign :: BVOp1 w t
           bvSign e = do zero <- WI.bvLit sym knownRepr (BV.zero knownNat)
                         neg_one <- WI.bvLit sym knownNat (BV.mkBV knownNat (-1))
@@ -573,20 +564,20 @@ translateOp1 sym op xe = case (op, xe) of
                         e_neg <- WI.bvSlt sym e zero
                         t <- WI.bvIte sym e_neg neg_one pos_one
                         WI.bvIte sym e_zero zero t
-          fpSign :: FPOp1 fpp t
-          fpSign e = do zero <- WI.floatLit sym knownRepr 0
-                        neg_one <- WI.floatLit sym knownRepr (-1)
-                        pos_one <- WI.floatLit sym knownRepr 1
-                        e_zero <- WI.floatEq sym e zero
-                        e_neg <- WI.floatLt sym e zero
-                        t <- WI.floatIte sym e_neg neg_one pos_one
-                        WI.floatIte sym e_zero zero t
-  (CE.Recip _, xe) -> fpOp recip xe
-    where recip :: FPOp1 fpp t
-          recip e = do one <- WI.floatLit sym knownRepr 1
-                       WI.floatDiv sym fpRM one e
+          realSign :: RealOp1 t
+          realSign e = do zero <- WI.realLit sym 0
+                          neg_one <- WI.realLit sym (-1)
+                          pos_one <- WI.realLit sym 1
+                          e_zero <- WI.realEq sym e zero
+                          e_neg <- WI.realLt sym e zero
+                          t <- WI.realIte sym e_neg neg_one pos_one
+                          WI.realIte sym e_zero zero t
+  (CE.Recip _, xe) -> realOp recip xe
+    where recip :: RealOp1 t
+          recip e = do one <- WI.realLit sym 1
+                       WI.realDiv sym one e
   (CE.Exp _, xe) -> realOp (WI.realExp sym) xe
-  (CE.Sqrt _, xe) -> fpOp (WI.floatSqrt sym fpRM) xe
+  (CE.Sqrt _, xe) -> realOp (WI.realSqrt sym) xe
   (CE.Log _, xe) -> realOp (WI.realLog sym) xe
   (CE.Sin _, xe) -> realOp (WI.realSin sym) xe
   (CE.Cos _, xe) -> realOp (WI.realCos sym) xe
@@ -649,10 +640,10 @@ translateOp1 sym op xe = case (op, xe) of
       Nothing -> panic
   _ -> panic
   where numOp :: (forall w . BVOp1 w t)
-              -> (forall fpp . FPOp1 fpp t)
+              -> RealOp1 t
               -> XExpr t
               -> IO (XExpr t)
-        numOp bvOp fpOp xe = case xe of
+        numOp bvOp realOp xe = case xe of
           XInt8 e -> XInt8 <$> bvOp e
           XInt16 e -> XInt16 <$> bvOp e
           XInt32 e -> XInt32 <$> bvOp e
@@ -661,8 +652,8 @@ translateOp1 sym op xe = case (op, xe) of
           XWord16 e -> XWord16 <$> bvOp e
           XWord32 e -> XWord32 <$> bvOp e
           XWord64 e -> XWord64 <$> bvOp e
-          XFloat e -> XFloat <$> fpOp e
-          XDouble e -> XDouble <$> fpOp e
+          XFloat e -> XFloat <$> realOp e
+          XDouble e -> XDouble <$> realOp e
           _ -> panic
 
         bvOp :: (forall w . BVOp1 w t) -> XExpr t -> IO (XExpr t)
@@ -677,18 +668,10 @@ translateOp1 sym op xe = case (op, xe) of
           XWord64 e -> XWord64 <$> f e
           _ -> panic
 
-        fpOp :: (forall fpp . FPOp1 fpp t) -> XExpr t -> IO (XExpr t)
-        fpOp g xe = case xe of
-          XFloat e -> XFloat <$> g e
-          XDouble e -> XDouble <$> g e
-          _ -> panic
-
         realOp :: RealOp1 t -> XExpr t -> IO (XExpr t)
-        realOp h xe = fpOp hf xe
-          where hf :: (forall fpp . FPOp1 fpp t)
-                hf e = do re <- WI.floatToReal sym e
-                          hre <- h re
-                          WI.realToFloat sym knownRepr fpRM hre
+        realOp h (XFloat e) = XFloat <$> h e
+        realOp h (XDouble e) = XDouble <$> h e
+        realOp _ _ = panic
 
         realRecip :: RealOp1 t
         realRecip e = do one <- WI.realLit sym 1
@@ -705,6 +688,8 @@ type BoolCmp2 t = WB.BoolExpr t -> WB.BoolExpr t -> IO (WB.BoolExpr t)
 type BVCmp2 w t = (KnownNat w, 1 <= w) => WB.BVExpr t w -> WB.BVExpr t w -> IO (WB.BoolExpr t)
 
 type FPCmp2 fpp t = KnownRepr WT.FloatPrecisionRepr fpp => WB.Expr t (WT.BaseFloatType fpp) -> WB.Expr t (WT.BaseFloatType fpp) -> IO (WB.BoolExpr t)
+
+type RealCmp2 t = WB.Expr t WT.BaseRealType -> WB.Expr t WT.BaseRealType -> IO (WB.BoolExpr t)
 
 translateOp2 :: forall t st fs a b c .
                 WB.ExprBuilder t st fs
@@ -723,27 +708,19 @@ translateOp2 :: forall t st fs a b c .
 translateOp2 sym powFn logbFn op xe1 xe2 = case (op, xe1, xe2) of
   (CE.And, XBool e1, XBool e2) -> XBool <$> WI.andPred sym e1 e2
   (CE.Or, XBool e1, XBool e2) -> XBool <$> WI.orPred sym e1 e2
-  (CE.Add _, xe1, xe2) -> numOp (WI.bvAdd sym) (WI.floatAdd sym fpRM) xe1 xe2
-  (CE.Sub _, xe1, xe2) -> numOp (WI.bvSub sym) (WI.floatSub sym fpRM) xe1 xe2
-  (CE.Mul _, xe1, xe2) -> numOp (WI.bvMul sym) (WI.floatMul sym fpRM) xe1 xe2
+  (CE.Add _, xe1, xe2) -> numOp (WI.bvAdd sym) (WI.realAdd sym) xe1 xe2
+  (CE.Sub _, xe1, xe2) -> numOp (WI.bvSub sym) (WI.realSub sym) xe1 xe2
+  (CE.Mul _, xe1, xe2) -> numOp (WI.bvMul sym) (WI.realMul sym) xe1 xe2
   (CE.Mod _, xe1, xe2) -> bvOp (WI.bvSrem sym) (WI.bvUrem sym) xe1 xe2
   (CE.Div _, xe1, xe2) -> bvOp (WI.bvSdiv sym) (WI.bvUdiv sym) xe1 xe2
-  (CE.Fdiv _, xe1, xe2) -> fpOp (WI.floatDiv sym fpRM) xe1 xe2
-  (CE.Pow _, xe1, xe2) -> fpOp powFn' xe1 xe2
-    where powFn' :: FPOp2 fpp t
-          powFn' e1 e2 = do re1 <- WI.floatToReal sym e1
-                            re2 <- WI.floatToReal sym e2
-                            let args = (Empty :> re1 :> re2)
-                            rpow <- WI.applySymFn sym powFn args
-                            WI.realToFloat sym knownRepr fpRM rpow
-  (CE.Logb _, xe1, xe2) -> fpOp logbFn' xe1 xe2
-    where logbFn' :: FPOp2 fpp t
-          logbFn' e1 e2 = do re1 <- WI.floatToReal sym e1
-                             re2 <- WI.floatToReal sym e2
-                             let args = (Empty :> re1 :> re2)
-                             rpow <- WI.applySymFn sym logbFn args
-                             WI.realToFloat sym knownRepr fpRM rpow
-  (CE.Eq _, xe1, xe2) -> cmp (WI.eqPred sym) (WI.bvEq sym) (WI.floatEq sym) xe1 xe2
+  (CE.Fdiv _, xe1, xe2) -> realOp (WI.realDiv sym) xe1 xe2
+  (CE.Pow _, xe1, xe2) -> realOp powFn' xe1 xe2
+    where powFn' :: RealOp2 t
+          powFn' e1 e2 = WI.applySymFn sym powFn (Empty :> e1 :> e2)
+  (CE.Logb _, xe1, xe2) -> realOp logbFn' xe1 xe2
+    where logbFn' :: RealOp2 t
+          logbFn' e1 e2 = WI.applySymFn sym logbFn (Empty :> e1 :> e2)
+  (CE.Eq _, xe1, xe2) -> cmp (WI.eqPred sym) (WI.bvEq sym) (WI.realEq sym) xe1 xe2
   (CE.Ne _, xe1, xe2) -> cmp neqPred bvNeq fpNeq xe1 xe2
     where neqPred :: BoolCmp2 t
           neqPred e1 e2 = do e <- WI.eqPred sym e1 e2
@@ -751,13 +728,13 @@ translateOp2 sym powFn logbFn op xe1 xe2 = case (op, xe1, xe2) of
           bvNeq :: forall w . BVCmp2 w t
           bvNeq e1 e2 = do e <- WI.bvEq sym e1 e2
                            WI.notPred sym e
-          fpNeq :: forall fpp . FPCmp2 fpp t
-          fpNeq e1 e2 = do e <- WI.floatEq sym e1 e2
+          fpNeq :: RealCmp2 t
+          fpNeq e1 e2 = do e <- WI.realEq sym e1 e2
                            WI.notPred sym e
-  (CE.Le _, xe1, xe2) -> numCmp (WI.bvSle sym) (WI.bvUle sym) (WI.floatLe sym) xe1 xe2
-  (CE.Ge _, xe1, xe2) -> numCmp (WI.bvSge sym) (WI.bvUge sym) (WI.floatGe sym) xe1 xe2
-  (CE.Lt _, xe1, xe2) -> numCmp (WI.bvSlt sym) (WI.bvUlt sym) (WI.floatLt sym) xe1 xe2
-  (CE.Gt _, xe1, xe2) -> numCmp (WI.bvSgt sym) (WI.bvUgt sym) (WI.floatGt sym) xe1 xe2
+  (CE.Le _, xe1, xe2) -> numCmp (WI.bvSle sym) (WI.bvUle sym) (WI.realLe sym) xe1 xe2
+  (CE.Ge _, xe1, xe2) -> numCmp (WI.bvSge sym) (WI.bvUge sym) (WI.realGe sym) xe1 xe2
+  (CE.Lt _, xe1, xe2) -> numCmp (WI.bvSlt sym) (WI.bvUlt sym) (WI.realLt sym) xe1 xe2
+  (CE.Gt _, xe1, xe2) -> numCmp (WI.bvSgt sym) (WI.bvUgt sym) (WI.realGt sym) xe1 xe2
   (CE.BwAnd _, xe1, xe2) -> bvOp (WI.bvAndBits sym) (WI.bvAndBits sym) xe1 xe2
   (CE.BwOr _, xe1, xe2) -> bvOp (WI.bvOrBits sym) (WI.bvOrBits sym) xe1 xe2
   (CE.BwXor _, xe1, xe2) -> bvOp (WI.bvXorBits sym) (WI.bvXorBits sym) xe1 xe2
@@ -794,11 +771,11 @@ translateOp2 sym powFn logbFn op xe1 xe2 = case (op, xe1, xe2) of
       _ -> panic
   _ -> panic
   where numOp :: (forall w . BVOp2 w t)
-              -> (forall fpp . FPOp2 fpp t)
+              -> RealOp2 t
               -> XExpr t
               -> XExpr t
               -> IO (XExpr t)
-        numOp bvOp fpOp xe1 xe2 = case (xe1, xe2) of
+        numOp bvOp realOp xe1 xe2 = case (xe1, xe2) of
           (XInt8 e1, XInt8 e2) -> XInt8 <$> bvOp e1 e2
           (XInt16 e1, XInt16 e2) -> XInt16 <$> bvOp e1 e2
           (XInt32 e1, XInt32 e2)-> XInt32 <$> bvOp e1 e2
@@ -807,8 +784,8 @@ translateOp2 sym powFn logbFn op xe1 xe2 = case (op, xe1, xe2) of
           (XWord16 e1, XWord16 e2)-> XWord16 <$> bvOp e1 e2
           (XWord32 e1, XWord32 e2)-> XWord32 <$> bvOp e1 e2
           (XWord64 e1, XWord64 e2)-> XWord64 <$> bvOp e1 e2
-          (XFloat e1, XFloat e2)-> XFloat <$> fpOp e1 e2
-          (XDouble e1, XDouble e2)-> XDouble <$> fpOp e1 e2
+          (XFloat e1, XFloat e2)-> XFloat <$> realOp e1 e2
+          (XDouble e1, XDouble e2)-> XDouble <$> realOp e1 e2
           _ -> panic
 
         bvOp :: (forall w . BVOp2 w t)
@@ -827,22 +804,22 @@ translateOp2 sym powFn logbFn op xe1 xe2 = case (op, xe1, xe2) of
           (XWord64 e1, XWord64 e2) -> XWord64 <$> opU e1 e2
           _ -> panic
 
-        fpOp :: (forall fpp . FPOp2 fpp t)
-             -> XExpr t
-             -> XExpr t
-             -> IO (XExpr t)
-        fpOp op xe1 xe2 = case (xe1, xe2) of
+        realOp :: RealOp2 t
+               -> XExpr t
+               -> XExpr t
+               -> IO (XExpr t)
+        realOp op xe1 xe2 = case (xe1, xe2) of
           (XFloat e1, XFloat e2) -> XFloat <$> op e1 e2
           (XDouble e1, XDouble e2) -> XDouble <$> op e1 e2
           _ -> panic
 
         cmp :: BoolCmp2 t
             -> (forall w . BVCmp2 w t)
-            -> (forall fpp . FPCmp2 fpp t)
+            -> RealCmp2 t
             -> XExpr t
             -> XExpr t
             -> IO (XExpr t)
-        cmp boolOp bvOp fpOp xe1 xe2 = case (xe1, xe2) of
+        cmp boolOp bvOp realOp xe1 xe2 = case (xe1, xe2) of
           (XBool e1, XBool e2) -> XBool <$> boolOp e1 e2
           (XInt8 e1, XInt8 e2) -> XBool <$> bvOp e1 e2
           (XInt16 e1, XInt16 e2) -> XBool <$> bvOp e1 e2
@@ -852,17 +829,17 @@ translateOp2 sym powFn logbFn op xe1 xe2 = case (op, xe1, xe2) of
           (XWord16 e1, XWord16 e2)-> XBool <$> bvOp e1 e2
           (XWord32 e1, XWord32 e2)-> XBool <$> bvOp e1 e2
           (XWord64 e1, XWord64 e2)-> XBool <$> bvOp e1 e2
-          (XFloat e1, XFloat e2)-> XBool <$> fpOp e1 e2
-          (XDouble e1, XDouble e2)-> XBool <$> fpOp e1 e2
+          (XFloat e1, XFloat e2)-> XBool <$> realOp e1 e2
+          (XDouble e1, XDouble e2)-> XBool <$> realOp e1 e2
           _ -> panic
 
         numCmp :: (forall w . BVCmp2 w t)
                -> (forall w . BVCmp2 w t)
-               -> (forall fpp . FPCmp2 fpp t)
+               -> RealCmp2 t
                -> XExpr t
                -> XExpr t
                -> IO (XExpr t)
-        numCmp bvSOp bvUOp fpOp xe1 xe2 = case (xe1, xe2) of
+        numCmp bvSOp bvUOp realOp xe1 xe2 = case (xe1, xe2) of
           (XInt8 e1, XInt8 e2) -> XBool <$> bvSOp e1 e2
           (XInt16 e1, XInt16 e2) -> XBool <$> bvSOp e1 e2
           (XInt32 e1, XInt32 e2)-> XBool <$> bvSOp e1 e2
@@ -871,8 +848,8 @@ translateOp2 sym powFn logbFn op xe1 xe2 = case (op, xe1, xe2) of
           (XWord16 e1, XWord16 e2)-> XBool <$> bvUOp e1 e2
           (XWord32 e1, XWord32 e2)-> XBool <$> bvUOp e1 e2
           (XWord64 e1, XWord64 e2)-> XBool <$> bvUOp e1 e2
-          (XFloat e1, XFloat e2)-> XBool <$> fpOp e1 e2
-          (XDouble e1, XDouble e2)-> XBool <$> fpOp e1 e2
+          (XFloat e1, XFloat e2)-> XBool <$> realOp e1 e2
+          (XDouble e1, XDouble e2)-> XBool <$> realOp e1 e2
           _ -> panic
 
         buildIndexExpr :: 1 <= n
@@ -908,8 +885,8 @@ translateOp2 sym powFn logbFn op xe1 xe2 = case (op, xe1, xe2) of
               (XWord16 e1, XWord16 e2) -> XWord16 <$> WI.bvIte sym pred e1 e2
               (XWord32 e1, XWord32 e2) -> XWord32 <$> WI.bvIte sym pred e1 e2
               (XWord64 e1, XWord64 e2) -> XWord64 <$> WI.bvIte sym pred e1 e2
-              (XFloat e1, XFloat e2) -> XFloat <$> WI.floatIte sym pred e1 e2
-              (XDouble e1, XDouble e2) -> XDouble <$> WI.floatIte sym pred e1 e2
+              (XFloat e1, XFloat e2) -> XFloat <$> WI.realIte sym pred e1 e2
+              (XDouble e1, XDouble e2) -> XDouble <$> WI.realIte sym pred e1 e2
               (XStruct xes1, XStruct xes2) ->
                 XStruct <$> zipWithM (mkIte sym pred) xes1 xes2
               (XArray xes1, XArray xes2) ->
@@ -936,7 +913,7 @@ translateOp3 sym (CE.Mux _) (XBool te) xe1 xe2 = case (xe1, xe2) of
   (XWord16 e1, XWord16 e2) -> XWord16 <$> WI.bvIte sym te e1 e2
   (XWord32 e1, XWord32 e2) -> XWord32 <$> WI.bvIte sym te e1 e2
   (XWord64 e1, XWord64 e2) -> XWord64 <$> WI.bvIte sym te e1 e2
-  (XFloat e1, XFloat e2) -> XFloat <$> WI.floatIte sym te e1 e2
-  (XDouble e1, XDouble e2) -> XDouble <$> WI.floatIte sym te e1 e2
+  (XFloat e1, XFloat e2) -> XFloat <$> WI.realIte sym te e1 e2
+  (XDouble e1, XDouble e2) -> XDouble <$> WI.realIte sym te e1 e2
   _ -> panic
 translateOp3 _ _ _ _ _ = panic
